@@ -26,6 +26,7 @@ async def index():
             <b>Welcome to the Location Service API!</b>
         </font>
         <font size="5">
+            <p>This shows that the CICD is working<p>
             <p>This API provides a backend service for a mobile application.</p></font>
             <p>Eventually, it will return a location based on a given IP address.</p>
             <p>Right now all it does is return a random location! :D</p>
