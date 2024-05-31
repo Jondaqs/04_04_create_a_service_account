@@ -1,0 +1,117 @@
+# This workflow will build and push a new container image to Amazon ECR,
+# and then will deploy a new task definition to Amazon ECS, when there is a push to the "main" branch.
+#
+# To use this workflow, you will need to complete the following set-up steps:
+#
+# 1. Create an ECR repository to store your images.
+#    For example: `aws ecr create-repository --repository-name my-ecr-repo --region us-east-2`.
+#    Replace the value of the `ECR_REPOSITORY` environment variable in the workflow below with your repository's name.
+#    Replace the value of the `AWS_REGION` environment variable in the workflow below with your repository's region.
+#
+# 2. Create an ECS task definition, an ECS cluster, and an ECS service.
+#    For example, follow the Getting Started guide on the ECS console:
+#      https://us-east-2.console.aws.amazon.com/ecs/home?region=us-east-2#/firstRun
+#    Replace the value of the `ECS_SERVICE` environment variable in the workflow below with the name you set for the Amazon ECS service.
+#    Replace the value of the `ECS_CLUSTER` environment variable in the workflow below with the name you set for the cluster.
+#
+# 3. Store your ECS task definition as a JSON file in your repository.
+#    The format should follow the output of `aws ecs register-task-definition --generate-cli-skeleton`.
+#    Replace the value of the `ECS_TASK_DEFINITION` environment variable in the workflow below with the path to the JSON file.
+#    Replace the value of the `CONTAINER_NAME` environment variable in the workflow below with the name of the container
+#    in the `containerDefinitions` section of the task definition.
+#
+# 4. Store an IAM user access key in GitHub Actions secrets named `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+#    See the documentation for each action used below for the recommended IAM policies for this IAM user,
+#    and best practices on handling the access key credentials.
+
+name: "3-Deployment"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        description: Enter the target environment for the deployment
+        options:
+        - Staging
+        - Production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.URL }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deploy staging with push to ECR
+        if: ${{ inputs.environment }} == 'Staging'
+        id: push
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ github.event.repository.name }}
+          docker push ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ github.event.repository.name }}
+
+      - name: Deploy production with aws CLI
+        if: ${{ inputs.environment }} == 'Production'
+        run: |
+          aws apprunner start-deployment --service-arn="${{ vars.SERVICE_ARN }}"
+
+      - name: Wait for Deployment to Begin
+        run: |
+          STATUS=$(aws apprunner describe-service --query="Service.Status" --output=text --service-arn="${{ vars.SERVICE_ARN }}")
+
+          until [ "${STATUS}" == "OPERATION_IN_PROGRESS" ];
+          do
+            echo "$(date) ${STATUS}"
+            STATUS=$(aws apprunner describe-service --query="Service.Status" --output=text --service-arn="${{ vars.SERVICE_ARN }}")
+            sleep 10;
+          done
+
+      - name: Wait for Deployment to Complete
+        id: status
+        timeout-minutes: 10
+        run: |
+          STATUS=$(aws apprunner describe-service --query="Service.Status" --output=text --service-arn="${{ vars.SERVICE_ARN }}")
+
+          while [ "${STATUS}" == "OPERATION_IN_PROGRESS" ];
+          do
+            echo "$(date) ${STATUS}"
+            STATUS=$(aws apprunner describe-service --query="Service.Status" --output=text --service-arn="${{ vars.SERVICE_ARN }}")
+            sleep 30;
+          done
+          echo "deployment_status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Deployment Status
+        id: check
+        run: |
+          if [ "${{ steps.status.outputs.deployment_status }}" == "RUNNING" ]; then
+            echo "Deployment successful"
+          else
+            echo "Deployment failed: ${{ steps.status.outputs.deployment_status }}"
+            exit 1
+          fi
